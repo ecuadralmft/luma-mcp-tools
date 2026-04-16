@@ -22,7 +22,7 @@ from .compat import (
 )
 from .migrate import migrate_v1 as _migrate_v1
 
-mcp = FastMCP("memory")
+mcp = FastMCP("obsidian")
 
 
 # ---------------------------------------------------------------------------

@@ -9,9 +9,9 @@ MEMORY_ROOT="$HOME/.luma-memory"
 echo "🔧 Installing luma-mcp-tools..."
 echo ""
 
-# Create memory root
+# Create memory vault root
 mkdir -p "$MEMORY_ROOT/global"
-echo "  ✓ Memory root: $MEMORY_ROOT"
+echo "  ✓ Vault root: $MEMORY_ROOT"
 
 # Set up gitpulse venv
 echo "  Setting up GitPulse..."
@@ -20,9 +20,9 @@ python3 -m venv .venv
 .venv/bin/pip install -q -r requirements.txt
 echo "  ✓ GitPulse ready"
 
-# Set up memory venv
+# Set up obsidian venv
 echo "  Setting up Obsidian Memory..."
-cd "$SCRIPT_DIR/servers/memory"
+cd "$SCRIPT_DIR/servers/obsidian"
 python3 -m venv .venv
 .venv/bin/pip install -q -r requirements.txt
 echo "  ✓ Obsidian Memory ready"
@@ -38,8 +38,8 @@ import json
 with open('$MCP_JSON') as f:
     cfg = json.load(f)
 servers = cfg.get('mcpServers', {})
-# Remove old gitpulse/memory entries, keep everything else
 servers.pop('gitpulse', None)
+servers.pop('obsidian', None)
 servers.pop('memory', None)
 print(json.dumps(servers))
 ")
@@ -55,9 +55,9 @@ existing['gitpulse'] = {
     'args': ['$SCRIPT_DIR/servers/gitpulse/server.py'],
     'env': {}
 }
-existing['memory'] = {
-    'command': '$SCRIPT_DIR/servers/memory/.venv/bin/python3',
-    'args': ['-m', 'memory'],
+existing['obsidian'] = {
+    'command': '$SCRIPT_DIR/servers/obsidian/.venv/bin/python3',
+    'args': ['-m', 'obsidian'],
     'cwd': '$SCRIPT_DIR/servers',
     'env': {'MEMORY_ROOT': '$MEMORY_ROOT'}
 }
@@ -71,11 +71,8 @@ echo ""
 echo "✅ Installation complete!"
 echo ""
 echo "Servers configured:"
-echo "  • GitPulse  → $SCRIPT_DIR/servers/gitpulse/"
-echo "  • Memory    → $SCRIPT_DIR/servers/memory/"
-echo "  • Vault root: $MEMORY_ROOT"
+echo "  • GitPulse        → $SCRIPT_DIR/servers/gitpulse/"
+echo "  • Obsidian Memory → $SCRIPT_DIR/servers/obsidian/"
+echo "  • Vault root      → $MEMORY_ROOT"
 echo ""
 echo "Restart kiro-cli to pick up the new MCP servers."
-echo ""
-echo "To migrate existing v1 memory, run in a kiro-cli session:"
-echo "  memory_migrate_v1(source_dir=\"path/to/conductor/memory/\")"
