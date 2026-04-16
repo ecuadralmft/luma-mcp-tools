@@ -403,9 +403,4 @@ def discover_tools(force: bool = False) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    mcp.run(transport="stdio")
+# Entry point: use __main__.py (python3 -m memory)

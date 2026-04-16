@@ -49,31 +49,22 @@ def _read_tier_content(tier: str) -> tuple[str, list[Note]]:
 
 
 def _tier_last_updated(tier: str) -> str | None:
-    if tier in FREEFORM_TIERS:
-        tp = tier_path(tier)
-        if tp.is_file():
-            return datetime.fromtimestamp(tp.stat().st_mtime, tz=timezone.utc).isoformat()
-        return None
-
-    paths = list_notes(tier)
+    paths = overlay_read(tier)
     if not paths:
         return None
-    mtime = max(p.stat().st_mtime for p in paths)
-    return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+    mtime = max(p.stat().st_mtime for p in paths if p.is_file())
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat() if mtime else None
 
 
 def _tier_size(tier: str) -> int:
-    if tier in FREEFORM_TIERS:
-        tp = tier_path(tier)
-        return tp.stat().st_size if tp.is_file() else 0
-    return sum(p.stat().st_size for p in list_notes(tier))
+    return sum(p.stat().st_size for p in overlay_read(tier) if p.is_file())
 
 
 def _count_entries(tier: str) -> int:
+    paths = overlay_read(tier)
     if tier in FREEFORM_TIERS:
-        tp = tier_path(tier)
-        return 1 if tp.is_file() and tp.read_text().strip() else 0
-    return len(list_notes(tier))
+        return 1 if paths and any(p.is_file() and p.read_text().strip() for p in paths) else 0
+    return len(paths)
 
 
 # ---------------------------------------------------------------------------

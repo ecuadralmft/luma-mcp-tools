@@ -52,14 +52,13 @@ import json
 existing = json.loads('$EXISTING')
 existing['gitpulse'] = {
     'command': '$SCRIPT_DIR/servers/gitpulse/.venv/bin/python3',
-    'args': ['-m', 'server'],
-    'cwd': '$SCRIPT_DIR/servers/gitpulse',
+    'args': ['$SCRIPT_DIR/servers/gitpulse/server.py'],
     'env': {}
 }
 existing['memory'] = {
     'command': '$SCRIPT_DIR/servers/memory/.venv/bin/python3',
-    'args': ['-m', 'server'],
-    'cwd': '$SCRIPT_DIR/servers/memory',
+    'args': ['-m', 'memory'],
+    'cwd': '$SCRIPT_DIR/servers',
     'env': {'MEMORY_ROOT': '$MEMORY_ROOT'}
 }
 cfg = {'mcpServers': existing}
