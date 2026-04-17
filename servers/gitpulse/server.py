@@ -2,7 +2,6 @@
 
 import fcntl
 import json
-import os
 import re
 import subprocess
 import time
@@ -20,13 +19,13 @@ mcp = FastMCP("gitpulse")
 DEFAULT_IGNORE = {"node_modules", ".git", ".cache", "__pycache__", ".venv", "venv", "vendor", ".worktrees", ".gitpulse"}
 LARGE_FILE_THRESHOLD = 10 * 1024 * 1024  # 10 MB
 CACHE_TTL_SECONDS = 300  # 5 minutes
+GPDIR = Path.home() / ".gitpulse"
 
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
 
 def _ws_root(path: str | None = None) -> Path:
-    """Resolve workspace root: walk up from *path* (or cwd) to find nearest .git, else use path/cwd."""
     start = Path(path).resolve() if path else Path.cwd().resolve()
     cur = start
     while cur != cur.parent:
@@ -37,25 +36,12 @@ def _ws_root(path: str | None = None) -> Path:
 
 
 def _gpdir(ws: Path) -> Path:
-    d = ws / ".gitpulse"
+    slug = str(ws).replace("/", "_").replace("\\", "_").strip("_")
+    d = GPDIR / slug
     d.mkdir(parents=True, exist_ok=True)
     (d / "cache").mkdir(exist_ok=True)
     (d / "audit").mkdir(exist_ok=True)
     return d
-
-
-def _ensure_gitignore(ws: Path) -> None:
-    gi = ws / ".gitignore"
-    entry = ".gitpulse/"
-    if gi.exists():
-        text = gi.read_text()
-        if entry not in text.splitlines():
-            with gi.open("a") as f:
-                if not text.endswith("\n"):
-                    f.write("\n")
-                f.write(entry + "\n")
-    else:
-        gi.write_text(entry + "\n")
 
 
 def _run(cmd: list[str], cwd: str | Path | None = None, timeout: int = 30) -> tuple[int, str, str]:
@@ -96,7 +82,7 @@ def _read_cache(ws: Path, name: str, ttl: int = CACHE_TTL_SECONDS) -> Any | None
     if p.exists():
         try:
             if ttl and (time.time() - p.stat().st_mtime) > ttl:
-                return None  # Stale
+                return None
             return json.loads(p.read_text())
         except (json.JSONDecodeError, OSError):
             return None
@@ -109,16 +95,12 @@ def _gh_auth_ok() -> tuple[bool, str]:
 
 
 def _fork_info(cwd: Path) -> dict:
-    """Use gh to detect fork and upstream info."""
     rc, out, _ = _gh(["repo", "view", "--json", "isFork,parent,url,name,owner"], cwd=cwd)
     if rc != 0:
         return {"is_fork": False, "parent": None}
     try:
         data = json.loads(out)
-        return {
-            "is_fork": data.get("isFork", False),
-            "parent": data.get("parent"),
-        }
+        return {"is_fork": data.get("isFork", False), "parent": data.get("parent")}
     except json.JSONDecodeError:
         return {"is_fork": False, "parent": None}
 
@@ -163,18 +145,12 @@ def _dirty_files(cwd: Path) -> list[dict]:
     rc, out, _ = _git(["status", "--porcelain"], cwd=cwd)
     if rc != 0 or not out:
         return []
-    files = []
-    for line in out.splitlines():
-        if len(line) >= 4:
-            files.append({"status": line[:2].strip(), "path": line[3:]})
-    return files
+    return [{"status": line[:2].strip(), "path": line[3:]} for line in out.splitlines() if len(line) >= 4]
 
 
 def _stashes(cwd: Path) -> list[str]:
     rc, out, _ = _git(["stash", "list"], cwd=cwd)
-    if rc != 0 or not out:
-        return []
-    return out.splitlines()
+    return out.splitlines() if rc == 0 and out else []
 
 
 def _remotes(cwd: Path) -> list[dict]:
@@ -184,10 +160,8 @@ def _remotes(cwd: Path) -> list[dict]:
     seen = {}
     for line in out.splitlines():
         parts = line.split()
-        if len(parts) >= 2:
-            name = parts[0]
-            if name not in seen:
-                seen[name] = parts[1]
+        if len(parts) >= 2 and parts[0] not in seen:
+            seen[parts[0]] = parts[1]
     return [{"name": n, "url": u} for n, u in seen.items()]
 
 
@@ -211,7 +185,6 @@ def _submodules(cwd: Path) -> list[dict]:
 def _find_repos(root: Path, ignore: set[str], found: list[Path] | None = None, _depth: int = 0, max_depth: int | None = None) -> list[Path]:
     if found is None:
         found = []
-        # Check if root itself is a repo
         if (root / ".git").exists():
             found.append(root)
     if max_depth is not None and _depth >= max_depth:
@@ -221,38 +194,15 @@ def _find_repos(root: Path, ignore: set[str], found: list[Path] | None = None, _
     except PermissionError:
         return found
     for entry in entries:
-        if not entry.is_dir():
-            continue
-        if entry.name in ignore:
-            continue
-        if entry.name == ".git":
+        if not entry.is_dir() or entry.name in ignore or entry.name == ".git":
             continue
         try:
-            has_git = (entry / ".git").exists()
+            if (entry / ".git").exists():
+                found.append(entry)
         except PermissionError:
             continue
-        if has_git:
-            found.append(entry)
         _find_repos(entry, ignore, found, _depth + 1, max_depth)
     return found
-
-
-def _repo_info(repo: Path, parent: Path | None = None) -> dict:
-    branch, detached = _current_branch(repo)
-    rems = _remotes(repo)
-    is_sub = parent is not None
-    fi = _fork_info(repo) if rems else {"is_fork": False, "parent": None}
-    return {
-        "path": str(repo),
-        "remotes": rems,
-        "branches": _branches(repo),
-        "current_branch": branch,
-        "detached": detached,
-        "is_submodule": is_sub,
-        "parent_repo": str(parent) if parent else None,
-        "is_fork": fi["is_fork"],
-        "upstream_remote": fi["parent"],
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -269,8 +219,6 @@ def scan_workspace(
     """Deep recursive scan to discover all git repos in a workspace. detail='minimal' returns paths + current branch only (fast). detail='full' includes branches, fork status, submodules (slower, makes gh API calls)."""
     t0 = time.monotonic()
     ws = _ws_root(path)
-    _ensure_gitignore(ws)
-
     ignore = set(ignore_patterns) if ignore_patterns else set(DEFAULT_IGNORE)
     repos = _find_repos(ws, ignore, max_depth=max_depth)
 
@@ -279,28 +227,27 @@ def scan_workspace(
         for rp in repos:
             branch, detached = _current_branch(rp)
             dirty = bool(_dirty_files(rp))
-            results.append({
-                "path": str(rp),
-                "current_branch": branch,
-                "detached": detached,
-                "dirty": dirty,
-            })
+            results.append({"path": str(rp), "current_branch": branch, "detached": detached, "dirty": dirty})
     else:
-        # Full detail: branches, forks, submodules
         sub_parents: dict[str, Path] = {}
         for rp in repos:
             for sm in _submodules(rp):
                 sp = (rp / sm["path"]).resolve()
                 sub_parents[str(sp)] = rp
-
         for rp in repos:
             parent = sub_parents.get(str(rp))
-            results.append(_repo_info(rp, parent))
+            branch, detached = _current_branch(rp)
+            rems = _remotes(rp)
+            fi = _fork_info(rp) if rems else {"is_fork": False, "parent": None}
+            results.append({
+                "path": str(rp), "remotes": rems, "branches": _branches(rp),
+                "current_branch": branch, "detached": detached,
+                "is_submodule": parent is not None, "parent_repo": str(parent) if parent else None,
+                "is_fork": fi["is_fork"], "upstream_remote": fi["parent"],
+            })
 
     data = {
-        "workspace_root": str(ws),
-        "repos": results,
-        "repo_count": len(results),
+        "workspace_root": str(ws), "repos": results, "repo_count": len(results),
         "cached_at": datetime.now(timezone.utc).isoformat(),
         "scan_duration_ms": round((time.monotonic() - t0) * 1000),
     }
@@ -324,21 +271,21 @@ def diagnose_workspace(
         scan = scan_workspace(path)
         repo_paths = [Path(r["path"]) for r in scan.get("repos", [])]
 
-    auth_ok, auth_msg = _gh_auth_ok()
     repo_reports = []
     summary = {"total_repos": len(repo_paths), "healthy": 0, "warnings": 0, "errors": 0}
 
     for rp in repo_paths:
         issues: list[dict] = []
 
-        # 1. Uncommitted changes
+        # Core checks (always run — lightweight)
         dirty = _dirty_files(rp)
         if dirty:
             issues.append({"type": "uncommitted_changes", "severity": "warning", "detail": f"{len(dirty)} dirty file(s)", "files": dirty})
 
-        # 2. Ahead/behind
         branch, detached = _current_branch(rp)
-        if not detached:
+        if detached:
+            issues.append({"type": "detached_head", "severity": "warning", "detail": f"HEAD detached at {branch}"})
+        elif branch:
             rc, out, _ = _git(["rev-list", "--left-right", "--count", f"{branch}...@{{u}}"], cwd=rp)
             if rc == 0 and out:
                 parts = out.split()
@@ -349,55 +296,43 @@ def diagnose_workspace(
                 if ahead > 0:
                     issues.append({"type": "ahead_of_remote", "severity": "info", "detail": f"{ahead} unpushed commit(s)"})
 
-        # 3. Detached HEAD
-        if detached:
-            issues.append({"type": "detached_head", "severity": "warning", "detail": f"HEAD detached at {branch}"})
-
-        # 4. Stale branches
-        rc, out, _ = _git(["branch", "--merged", "HEAD"], cwd=rp)
-        if rc == 0 and out:
-            merged = [b.strip().lstrip("* ") for b in out.splitlines()]
-            stale = [b for b in merged if b and b not in ("main", "master", branch)]
-            if stale:
-                issues.append({"type": "stale_branches", "severity": "info", "detail": f"{len(stale)} merged branch(es) could be deleted", "branches": stale})
-
-        # 5. Broken remotes (opt-in, network calls)
-        rems = _remotes(rp)
+        # Extended checks (only when check_remotes=True)
         if check_remotes:
-            for rem in rems:
+            # Stale branches
+            rc, out, _ = _git(["branch", "--merged", "HEAD"], cwd=rp)
+            if rc == 0 and out:
+                merged = [b.strip().lstrip("* ") for b in out.splitlines()]
+                stale = [b for b in merged if b and b not in ("main", "master", branch)]
+                if stale:
+                    issues.append({"type": "stale_branches", "severity": "info", "detail": f"{len(stale)} merged branch(es)", "branches": stale})
+
+            # Broken remotes
+            for rem in _remotes(rp):
                 rc2, _, _ = _git(["ls-remote", "--exit-code", rem["name"]], cwd=rp, timeout=10)
                 if rc2 != 0:
-                    issues.append({"type": "broken_remote", "severity": "error", "detail": f"Remote '{rem['name']}' ({rem['url']}) unreachable"})
+                    issues.append({"type": "broken_remote", "severity": "error", "detail": f"Remote '{rem['name']}' unreachable"})
 
-        # 6. Submodule drift
-        for sm in _submodules(rp):
-            if not sm["synced"]:
-                issues.append({"type": "submodule_drift", "severity": "warning", "detail": f"Submodule {sm['path']} out of sync"})
+            # Submodule drift
+            for sm in _submodules(rp):
+                if not sm["synced"]:
+                    issues.append({"type": "submodule_drift", "severity": "warning", "detail": f"Submodule {sm['path']} out of sync"})
 
-        # 7. Fork upstream drift
-        fi = _fork_info(rp) if rems else {"is_fork": False}
-        if fi.get("is_fork") and fi.get("parent"):
-            rc3, _, _ = _git(["fetch", "upstream", "--dry-run"], cwd=rp, timeout=15)
-            if rc3 == 0:
-                rc4, out4, _ = _git(["rev-list", "--count", f"HEAD..upstream/{branch}"], cwd=rp)
-                if rc4 == 0 and out4 and int(out4) > 0:
-                    issues.append({"type": "fork_upstream_drift", "severity": "warning", "detail": f"{out4} commit(s) behind upstream"})
+            # Large untracked
+            rc5, out5, _ = _git(["ls-files", "--others", "--exclude-standard"], cwd=rp)
+            if rc5 == 0 and out5:
+                for f in out5.splitlines():
+                    fp = rp / f
+                    try:
+                        if fp.is_file() and fp.stat().st_size > LARGE_FILE_THRESHOLD:
+                            size_mb = round(fp.stat().st_size / (1024 * 1024), 1)
+                            issues.append({"type": "large_untracked", "severity": "warning", "detail": f"{f} ({size_mb} MB)"})
+                    except OSError:
+                        pass
 
-        # 8. Large untracked files
-        rc5, out5, _ = _git(["ls-files", "--others", "--exclude-standard"], cwd=rp)
-        if rc5 == 0 and out5:
-            for f in out5.splitlines():
-                fp = rp / f
-                try:
-                    if fp.is_file() and fp.stat().st_size > LARGE_FILE_THRESHOLD:
-                        size_mb = round(fp.stat().st_size / (1024 * 1024), 1)
-                        issues.append({"type": "large_untracked", "severity": "warning", "detail": f"{f} ({size_mb} MB)"})
-                except OSError:
-                    pass
-
-        # 9. Auth issues
-        if not auth_ok and rems:
-            issues.append({"type": "gh_auth_issue", "severity": "error", "detail": auth_msg})
+            # Auth check
+            auth_ok, auth_msg = _gh_auth_ok()
+            if not auth_ok and _remotes(rp):
+                issues.append({"type": "gh_auth_issue", "severity": "error", "detail": auth_msg})
 
         has_err = any(i["severity"] == "error" for i in issues)
         has_warn = any(i["severity"] == "warning" for i in issues)
@@ -434,16 +369,10 @@ def repo_status(repo_path: str) -> dict:
 
     fi = _fork_info(rp)
     return {
-        "path": str(rp),
-        "current_branch": branch,
-        "detached": detached,
-        "dirty_files": _dirty_files(rp),
-        "ahead": ahead,
-        "behind": behind,
-        "stashes": _stashes(rp),
-        "submodules": _submodules(rp),
-        "remotes": _remotes(rp),
-        "is_fork": fi.get("is_fork", False),
+        "path": str(rp), "current_branch": branch, "detached": detached,
+        "dirty_files": _dirty_files(rp), "ahead": ahead, "behind": behind,
+        "stashes": _stashes(rp), "submodules": _submodules(rp),
+        "remotes": _remotes(rp), "is_fork": fi.get("is_fork", False),
         "upstream": fi.get("parent"),
     }
 
@@ -458,8 +387,7 @@ def sync_report(repo_path: str, include_upstream: bool = True) -> dict:
     ws = _ws_root(str(rp))
     branch, detached = _current_branch(rp)
 
-    # Fetch without modifying working tree
-    _git(["fetch", "--all", "--quiet"], cwd=rp, timeout=30)
+    _git(["fetch", "origin", "--quiet"], cwd=rp, timeout=30)
 
     def _commits_between(a: str, b: str) -> list[dict]:
         rc, out, _ = _git(["log", f"{a}..{b}", "--format=%H||%s||%an||%aI"], cwd=rp)
@@ -478,20 +406,11 @@ def sync_report(repo_path: str, include_upstream: bool = True) -> dict:
         if rc == 0:
             tracking = t
 
-    behind_commits = _commits_between(f"HEAD", tracking) if tracking else []
+    behind_commits = _commits_between("HEAD", tracking) if tracking else []
     ahead_commits = _commits_between(tracking, "HEAD") if tracking else []
-
-    # Fast-forward check
-    ff_possible = False
-    if tracking and behind_commits and not ahead_commits:
-        ff_possible = True
-    elif tracking and not behind_commits:
-        ff_possible = True
-
-    # Conflict likelihood
+    ff_possible = bool(tracking and behind_commits and not ahead_commits) or bool(tracking and not behind_commits)
     conflicts_likely = bool(ahead_commits and behind_commits)
 
-    # Upstream for forks
     upstream_behind: list[dict] = []
     if include_upstream:
         fi = _fork_info(rp)
@@ -500,14 +419,10 @@ def sync_report(repo_path: str, include_upstream: bool = True) -> dict:
             upstream_behind = _commits_between("HEAD", f"upstream/{branch}")
 
     data = {
-        "path": str(rp),
-        "local_ref": branch,
-        "remote_ref": tracking,
-        "commits_behind": behind_commits,
-        "commits_ahead": ahead_commits,
+        "path": str(rp), "local_ref": branch, "remote_ref": tracking,
+        "commits_behind": behind_commits, "commits_ahead": ahead_commits,
         "upstream_behind": upstream_behind,
-        "fast_forward_possible": ff_possible,
-        "conflicts_likely": conflicts_likely,
+        "fast_forward_possible": ff_possible, "conflicts_likely": conflicts_likely,
     }
     _audit(ws, {"tool": "sync_report", "repo": str(rp), "behind": len(behind_commits), "ahead": len(ahead_commits)})
     return data
@@ -529,13 +444,11 @@ def pull_repo(
 
     ws = _ws_root(str(targets[0]))
 
-    # Force always requires confirmation
     if strategy == "force" and not confirmed:
         return {
             "confirmation_required": True,
             "message": "Force pull will overwrite local changes. Call again with confirmed=True to proceed.",
-            "repos": [str(t) for t in targets],
-            "strategy": strategy,
+            "repos": [str(t) for t in targets], "strategy": strategy,
         }
 
     results = []
@@ -547,15 +460,11 @@ def pull_repo(
         cur_branch, _ = _current_branch(rp)
         target_branch = branch or cur_branch
 
-        # Stash if requested
         stashed = False
-        if stash_first:
-            dirty = _dirty_files(rp)
-            if dirty:
-                rc, _, _ = _git(["stash", "push", "-m", "gitpulse-auto-stash"], cwd=rp)
-                stashed = rc == 0
+        if stash_first and _dirty_files(rp):
+            rc, _, _ = _git(["stash", "push", "-m", "gitpulse-auto-stash"], cwd=rp)
+            stashed = rc == 0
 
-        # Build pull command
         if strategy == "ff_only":
             cmd = ["pull", "--ff-only", "origin", target_branch]
         elif strategy == "merge":
@@ -563,6 +472,9 @@ def pull_repo(
         elif strategy == "rebase":
             cmd = ["pull", "--rebase", "origin", target_branch]
         elif strategy == "force":
+            # Backup before destructive reset
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            _git(["branch", f"gitpulse-backup-{ts}"], cwd=rp)
             _git(["fetch", "origin", target_branch], cwd=rp)
             cmd = ["reset", "--hard", f"origin/{target_branch}"]
         else:
@@ -571,21 +483,11 @@ def pull_repo(
 
         rc, out, err = _git(cmd, cwd=rp, timeout=60)
 
-        # Count changes from git output
         files_changed = 0
-        commits_pulled = 0
-        combined = out + " " + err
-        # Parse "X files changed" pattern
-        fm = re.search(r'(\d+)\s+files?\s+changed', combined)
+        fm = re.search(r'(\d+)\s+files?\s+changed', out + " " + err)
         if fm:
             files_changed = int(fm.group(1))
-        # Count commits by checking shortstat or log
-        if rc == 0 and strategy != "force":
-            rc_c, out_c, _ = _git(["rev-list", "--count", f"{target_branch}@{{1}}..{target_branch}"], cwd=rp)
-            if rc_c == 0 and out_c.strip().isdigit():
-                commits_pulled = int(out_c.strip())
 
-        # Pop stash if we stashed
         warnings = []
         if stashed:
             rc2, _, err2 = _git(["stash", "pop"], cwd=rp)
@@ -593,35 +495,18 @@ def pull_repo(
                 warnings.append(f"Stash pop failed: {err2}. Stash preserved.")
 
         success = rc == 0
-        result_msg = out if success else err
 
-        # If conflict detected, return options
-        if not success and ("conflict" in err.lower() or "conflict" in out.lower()):
+        if not success and "conflict" in (err + out).lower():
             _git(["merge", "--abort"], cwd=rp)
-            if stashed:
-                pass  # stash still exists
             results.append({
-                "path": str(rp),
-                "success": False,
-                "result": "Conflicts detected",
-                "conflicts": True,
-                "options": [
-                    "Retry with strategy='rebase'",
-                    "Retry with strategy='force' (will overwrite local)",
-                    "Retry with stash_first=True",
-                    "Resolve manually",
-                ],
+                "path": str(rp), "success": False, "result": "Conflicts detected", "conflicts": True,
+                "options": ["strategy='rebase'", "strategy='force' (overwrites local)", "stash_first=True", "Resolve manually"],
             })
             continue
 
         results.append({
-            "path": str(rp),
-            "success": success,
-            "result": result_msg,
-            "commits_pulled": commits_pulled,
-            "files_changed": files_changed,
-            "strategy_used": strategy,
-            "warnings": warnings,
+            "path": str(rp), "success": success, "result": out if success else err,
+            "files_changed": files_changed, "strategy_used": strategy, "warnings": warnings,
         })
 
     _audit(ws, {"tool": "pull_repo", "repos": [str(t) for t in targets], "strategy": strategy, "results": [r.get("success") for r in results]})
@@ -648,20 +533,16 @@ def sync_fork(
     cur_branch, _ = _current_branch(rp)
     target_branch = branch or cur_branch
 
-    # Check if upstream remote exists, add if not
     rems = _remotes(rp)
-    has_upstream = any(r["name"] == "upstream" for r in rems)
-    if not has_upstream and fi.get("parent"):
+    if not any(r["name"] == "upstream" for r in rems) and fi.get("parent"):
         parent_url = fi["parent"].get("url", "")
         if parent_url:
             _git(["remote", "add", "upstream", parent_url], cwd=rp)
 
-    # Fetch upstream
     rc, _, err = _git(["fetch", "upstream"], cwd=rp, timeout=30)
     if rc != 0:
         return {"error": f"Failed to fetch upstream: {err}"}
 
-    # Count commits to sync
     rc2, out2, _ = _git(["rev-list", "--count", f"HEAD..upstream/{target_branch}"], cwd=rp)
     commits_to_sync = int(out2) if rc2 == 0 and out2 else 0
 
@@ -669,9 +550,7 @@ def sync_fork(
         return {
             "confirmation_required": True,
             "message": f"Will {strategy} {commits_to_sync} commit(s) from upstream/{target_branch}. Call again with confirmed=True.",
-            "repo": str(rp),
-            "strategy": strategy,
-            "commits_to_sync": commits_to_sync,
+            "repo": str(rp), "strategy": strategy, "commits_to_sync": commits_to_sync,
         }
 
     if strategy == "merge":
@@ -687,18 +566,13 @@ def sync_fork(
         _git(["merge", "--abort"] if strategy == "merge" else ["rebase", "--abort"], cwd=rp)
 
     data = {
-        "success": success,
-        "upstream_remote": "upstream",
+        "success": success, "upstream_remote": "upstream",
         "commits_synced": commits_to_sync if success else 0,
-        "conflicts": conflicts,
-        "result": out3 if success else err3,
+        "conflicts": conflicts, "result": out3 if success else err3,
     }
     _audit(ws, {"tool": "sync_fork", "repo": str(rp), "strategy": strategy, "success": success})
     return data
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     mcp.run(transport="stdio")
