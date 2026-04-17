@@ -3,7 +3,6 @@
 import json
 import os
 import re
-import subprocess
 import urllib.request
 from mcp.server.fastmcp import FastMCP
 
@@ -13,14 +12,14 @@ PROJECT = "PB"
 LUMA_MCP_URL = os.environ.get("LUMA_MCP_URL", "https://ai-mcp.lumafintech.com/mcp")
 
 SECTION_PATTERNS = [
-    ("problem", re.compile(r"1\.\s*Problem", re.I)),
-    ("user_module", re.compile(r"2\.\s*User\s*/?\s*Client\s*/?\s*Module", re.I)),
-    ("why_now", re.compile(r"3\.\s*Why\s+[Nn]ow", re.I)),
-    ("desired_outcome", re.compile(r"4\.\s*Desired\s+[Oo]utcome", re.I)),
-    ("scope", re.compile(r"5\.\s*Scope", re.I)),
-    ("acceptance_criteria", re.compile(r"6\.\s*Acceptance\s+[Cc]riteria", re.I)),
-    ("dependencies", re.compile(r"7\.\s*Dependenc", re.I)),
-    ("notes", re.compile(r"8\.\s*Notes", re.I)),
+    ("problem", re.compile(r"#{0,4}\s*1\.\s*Problem", re.I)),
+    ("user_module", re.compile(r"#{0,4}\s*2\.\s*User\s*/?\s*Client\s*/?\s*Module", re.I)),
+    ("why_now", re.compile(r"#{0,4}\s*3\.\s*Why\s+[Nn]ow", re.I)),
+    ("desired_outcome", re.compile(r"#{0,4}\s*4\.\s*Desired\s+[Oo]utcome", re.I)),
+    ("scope", re.compile(r"#{0,4}\s*5\.\s*Scope", re.I)),
+    ("acceptance_criteria", re.compile(r"#{0,4}\s*6\.\s*Acceptance\s+[Cc]riteria", re.I)),
+    ("dependencies", re.compile(r"#{0,4}\s*7\.\s*Dependenc", re.I)),
+    ("notes", re.compile(r"#{0,4}\s*8\.\s*Notes", re.I)),
 ]
 
 
@@ -31,40 +30,50 @@ SECTION_PATTERNS = [
 _session_id = None
 
 
-def _luma_call(method: str, arguments: dict) -> dict:
+def _luma_call(method: str, arguments: dict, _retry: bool = True) -> dict:
     global _session_id
     headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
 
-    if not _session_id:
-        init = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                           "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                                      "clientInfo": {"name": "pb-ticket", "version": "1.0"}}})
-        req = urllib.request.Request(LUMA_MCP_URL, data=init.encode(), headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            _session_id = resp.headers.get("Mcp-Session-Id", "")
+    try:
+        if not _session_id:
+            init = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                               "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                                           "clientInfo": {"name": "pb-ticket", "version": "1.0"}}})
+            req = urllib.request.Request(LUMA_MCP_URL, data=init.encode(), headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                _session_id = resp.headers.get("Mcp-Session-Id", "")
+            notif = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            headers["Mcp-Session-Id"] = _session_id
+            urllib.request.urlopen(urllib.request.Request(LUMA_MCP_URL, data=notif.encode(), headers=headers, method="POST"), timeout=5)
 
-        notif = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
         headers["Mcp-Session-Id"] = _session_id
-        urllib.request.urlopen(urllib.request.Request(LUMA_MCP_URL, data=notif.encode(), headers=headers, method="POST"), timeout=5)
+        call = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                            "params": {"name": method, "arguments": arguments}})
+        req = urllib.request.Request(LUMA_MCP_URL, data=call.encode(), headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode()
 
-    headers["Mcp-Session-Id"] = _session_id
-    call = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                        "params": {"name": method, "arguments": arguments}})
-    req = urllib.request.Request(LUMA_MCP_URL, data=call.encode(), headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        body = resp.read().decode()
+        for line in body.splitlines():
+            if line.startswith("data: "):
+                data = json.loads(line[6:])
+                content = data.get("result", {}).get("content", [])
+                for c in content:
+                    text = c.get("text", "")
+                    if text:
+                        try:
+                            return json.loads(text)
+                        except json.JSONDecodeError:
+                            return {"raw": text}
+    except Exception:
+        if _retry:
+            _session_id = None
+            return _luma_call(method, arguments, _retry=False)
+        return {"error": f"Luma MCP call failed: {method}"}
 
-    for line in body.splitlines():
-        if line.startswith("data: "):
-            data = json.loads(line[6:])
-            content = data.get("result", {}).get("content", [])
-            for c in content:
-                text = c.get("text", "")
-                if text:
-                    try:
-                        return json.loads(text)
-                    except json.JSONDecodeError:
-                        return {"raw": text}
+    # Empty response — session may be stale
+    if _retry:
+        _session_id = None
+        return _luma_call(method, arguments, _retry=False)
     return {}
 
 
@@ -93,15 +102,24 @@ def _adf_to_text(node) -> str:
         child_text = "".join(_adf_to_text(c) for c in children)
         if ntype == "hardBreak":
             return "\n"
-        if ntype in ("heading",):
+        if ntype == "heading":
             level = node.get("attrs", {}).get("level", 2)
             return f"\n{'#' * level} {child_text}\n"
+        if ntype == "codeBlock":
+            lang = node.get("attrs", {}).get("language", "")
+            return f"\n```{lang}\n{child_text}\n```\n"
         if ntype == "bulletList":
+            return child_text
+        if ntype == "orderedList":
             return child_text
         if ntype == "listItem":
             return f"- {child_text}\n"
-        if ntype == "orderedList":
-            return child_text
+        if ntype == "table":
+            return child_text + "\n"
+        if ntype in ("tableRow", "tableHeader", "tableCell"):
+            return child_text + " | "
+        if ntype == "mention":
+            return node.get("attrs", {}).get("text", text)
         return text + child_text
     return ""
 
@@ -113,7 +131,6 @@ def _parse_sections(adf) -> dict:
     if not text:
         return {}
 
-    sections = {}
     positions = []
     for name, pattern in SECTION_PATTERNS:
         m = pattern.search(text)
@@ -124,10 +141,10 @@ def _parse_sections(adf) -> dict:
         return {"description": text}
 
     positions.sort()
+    sections = {}
     for i, (pos, name) in enumerate(positions):
         end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
         chunk = text[pos:end]
-        # Remove the heading line
         lines = chunk.split("\n", 1)
         sections[name] = lines[1].strip() if len(lines) > 1 else ""
 
@@ -151,13 +168,15 @@ def _compact_issue(issue: dict) -> dict:
 def _walk_parent_chain(issue: dict) -> list:
     chain = []
     current = issue
+    seen = set()
     while True:
         parent = current.get("fields", {}).get("parent")
         if not parent:
             break
         parent_key = parent.get("key", "")
-        if not parent_key:
+        if not parent_key or parent_key in seen:
             break
+        seen.add(parent_key)
         parent_issue = _jira_get(parent_key)
         if not parent_issue or "fields" not in parent_issue:
             chain.append({"key": parent_key, "type": "?",
@@ -203,7 +222,6 @@ def pb_context(scope: str | None = None) -> dict:
 
     if scope:
         scope_lower = scope.lower()
-        # Filter: keep issues matching scope in key or summary, plus their ancestors
         matching_keys = set()
         for iss in issues:
             f = iss.get("fields", {})
@@ -211,24 +229,33 @@ def pb_context(scope: str | None = None) -> dict:
             summary = f.get("summary", "")
             if scope_lower in key.lower() or scope_lower in summary.lower():
                 matching_keys.add(key)
-                # Include parent chain
-                parent = f.get("parent", {})
-                if parent and parent.get("key"):
-                    matching_keys.add(parent["key"])
 
-        # Walk up to capture full ancestor chains
-        expanded = set(matching_keys)
+        # Build parent lookup
+        parent_of = {}
+        children_of = {}
         for iss in issues:
             key = iss.get("key", "")
-            if key in expanded:
-                parent = iss.get("fields", {}).get("parent", {})
-                if parent and parent.get("key"):
-                    expanded.add(parent["key"])
-        # Also include children of matching keys
-        for iss in issues:
             parent = iss.get("fields", {}).get("parent", {})
-            if parent and parent.get("key") in matching_keys:
-                expanded.add(iss.get("key", ""))
+            pk = parent.get("key") if parent else None
+            parent_of[key] = pk
+            if pk:
+                children_of.setdefault(pk, set()).add(key)
+
+        # Expand ancestors (loop until stable)
+        expanded = set(matching_keys)
+        changed = True
+        while changed:
+            changed = False
+            for key in list(expanded):
+                pk = parent_of.get(key)
+                if pk and pk not in expanded:
+                    expanded.add(pk)
+                    changed = True
+
+        # Expand children of matching keys
+        for key in list(matching_keys):
+            for child in children_of.get(key, set()):
+                expanded.add(child)
 
         issues = [i for i in issues if i.get("key", "") in expanded]
 
@@ -249,10 +276,8 @@ def pb_ticket(key: str) -> dict:
     result["severity"] = (f.get("customfield_10812") or {}).get("value")
     result["parent_chain"] = _walk_parent_chain(issue)
 
-    # Parse description sections
     result["sections"] = _parse_sections(f.get("description"))
 
-    # Value statement and definition of done
     vs = f.get("customfield_10820")
     if vs:
         result["value_statement"] = _adf_to_text(vs).strip()
@@ -260,7 +285,6 @@ def pb_ticket(key: str) -> dict:
     if dod:
         result["definition_of_done"] = _adf_to_text(dod).strip()
 
-    # Siblings (other children of same parent)
     parent = f.get("parent", {})
     if parent and parent.get("key"):
         sibling_issues = _jira_search(
@@ -289,11 +313,6 @@ def pb_place(summary: str, description: str | None = None) -> dict:
         parent = f.get("parent", {})
         parent_summary = parent.get("fields", {}).get("summary", "") if parent else ""
         parent_key = parent.get("key", "") if parent else ""
-        # Count children
-        children = _jira_search(
-            f"project = {PROJECT} AND parent = {iss.get('key', '')}",
-            fields="key", max_results=1
-        )
         result.append({
             "key": iss.get("key", ""),
             "summary": f.get("summary", ""),
