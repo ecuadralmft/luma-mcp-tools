@@ -57,8 +57,7 @@ existing['gitpulse'] = {
 }
 existing['obsidian'] = {
     'command': '$SCRIPT_DIR/servers/obsidian/.venv/bin/python3',
-    'args': ['-m', 'obsidian'],
-    'cwd': '$SCRIPT_DIR/servers',
+    'args': ['$SCRIPT_DIR/servers/obsidian/run.py'],
     'env': {'MEMORY_ROOT': '$MEMORY_ROOT'}
 }
 cfg = {'mcpServers': existing}

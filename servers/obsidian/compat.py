@@ -36,8 +36,12 @@ def _read_tier_content(tier: str) -> tuple[str, list[Note]]:
     """Read a tier and return (concatenated_content, notes).
     For freeform tiers, notes list is empty."""
     if tier in FREEFORM_TIERS:
-        tp = tier_path(tier)
-        content = tp.read_text() if tp.is_file() else ""
+        paths = overlay_read(tier)
+        content = ""
+        for p in paths:
+            if p.is_file():
+                content = p.read_text()
+                break
         return content, []
 
     paths = overlay_read(tier)
