@@ -95,8 +95,16 @@ def render_note(note: Note) -> str:
     return f"---\n{header}---\n{note.body}"
 
 
+SEQ_RE = re.compile(r"^(\d+)-")
+
+
 def generate_note_id(tier: str, title: str, vault_path: Path) -> str:
     tier_dir = vault_path / tier
-    existing = list(tier_dir.glob("*.md")) if tier_dir.is_dir() else []
-    seq = len(existing) + 1
-    return f"{tier}/{seq:03d}-{slugify(title)}"
+    max_seq = 0
+    if tier_dir.is_dir():
+        for f in tier_dir.iterdir():
+            if f.suffix == ".md":
+                m = SEQ_RE.match(f.stem)
+                if m:
+                    max_seq = max(max_seq, int(m.group(1)))
+    return f"{tier}/{max_seq + 1:03d}-{slugify(title)}"

@@ -57,9 +57,12 @@ def parse_v1_entries(content: str) -> list[dict]:
 
 
 def _write_locked(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         f.write(content)
+        f.flush()
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def migrate_v1(source_dir: str, target_vault: str | None = None) -> dict:

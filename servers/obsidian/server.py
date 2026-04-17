@@ -51,7 +51,7 @@ def memory_write(
     """Write to workspace memory. Mode: append (default) or overwrite. Overwrite only for project/active tiers."""
     result = compat_write(tier, content, mode, tags, source)
     if result.get("success"):
-        get_index().invalidate()
+        rebuild_index()
     return result
 
 
@@ -321,7 +321,7 @@ def discover_tools(force: bool = False) -> dict:
         return []
 
     def _probe_server(name, conf):
-        if name == "memory":
+        if name in ("memory", "obsidian"):
             return name, [
                 "memory_read", "memory_write", "memory_search", "memory_compact",
                 "memory_status", "memory_note_read", "memory_note_write",

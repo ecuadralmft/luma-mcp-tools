@@ -32,6 +32,19 @@ def _write_locked(path: Path, content: str, mode: str = "w") -> None:
         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
+def _render_v1_entry(note: Note) -> str:
+    """Render a note as a v1-compatible entry block with frontmatter."""
+    lines = ["---"]
+    lines.append(f"date: {note.created.isoformat()}")
+    if note.tags:
+        lines.append(f"tags: [{', '.join(note.tags)}]")
+    if note.source:
+        lines.append(f"source: {note.source}")
+    lines.append("---")
+    lines.append(note.body)
+    return "\n".join(lines)
+
+
 def _read_tier_content(tier: str) -> tuple[str, list[Note]]:
     """Read a tier and return (concatenated_content, notes).
     For freeform tiers, notes list is empty."""
@@ -48,7 +61,7 @@ def _read_tier_content(tier: str) -> tuple[str, list[Note]]:
     notes = [parse_note(p) for p in paths]
     if not notes:
         return "", notes
-    content = ENTRY_SEPARATOR.join(n.body for n in notes)
+    content = ENTRY_SEPARATOR.join(_render_v1_entry(n) for n in notes)
     return content, notes
 
 
@@ -56,7 +69,7 @@ def _tier_last_updated(tier: str) -> str | None:
     paths = overlay_read(tier)
     if not paths:
         return None
-    mtime = max(p.stat().st_mtime for p in paths if p.is_file())
+    mtime = max((p.stat().st_mtime for p in paths if p.is_file()), default=0)
     return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat() if mtime else None
 
 
@@ -89,8 +102,6 @@ def compat_read(
                 combined[t] = {"entries": count, "bytes": _tier_size(t)}
             else:
                 content, _ = _read_tier_content(t)
-                if not content.strip():
-                    continue
                 combined[t] = {
                     "content": content[:2000] + ("..." if len(content) > 2000 else ""),
                     "entries_count": count,
@@ -106,10 +117,9 @@ def compat_read(
         pattern = re.compile(search, re.IGNORECASE)
         if notes:
             notes = [n for n in notes if pattern.search(n.body)]
-            content = ENTRY_SEPARATOR.join(n.body for n in notes)
-        else:
-            lines = content.splitlines()
-            content = "\n".join(l for l in lines if pattern.search(l))
+            content = ENTRY_SEPARATOR.join(_render_v1_entry(n) for n in notes)
+        elif not pattern.search(content):
+            content = ""
 
     if last_n and notes:
         notes = notes[-last_n:]
@@ -197,20 +207,38 @@ def compat_search(
     for tier in search_tiers:
         if tier not in TIERS:
             continue
-        content, _ = _read_tier_content(tier)
-        if not content:
-            continue
-        lines = content.splitlines()
-        for i, line in enumerate(lines, 1):
-            if pattern.search(line):
-                start = max(0, i - 3)
-                end = min(len(lines), i + 2)
-                results.append({
-                    "tier": tier,
-                    "line_number": i,
-                    "content": line.strip(),
-                    "context": "\n".join(lines[start:end]),
-                })
+        if tier in FREEFORM_TIERS:
+            paths = overlay_read(tier)
+            for p in paths:
+                if p.is_file():
+                    content = p.read_text()
+                    if pattern.search(content):
+                        lines = content.splitlines()
+                        for i, line in enumerate(lines, 1):
+                            if pattern.search(line):
+                                start = max(0, i - 3)
+                                end = min(len(lines), i + 2)
+                                results.append({
+                                    "tier": tier,
+                                    "note_id": tier,
+                                    "content": line.strip(),
+                                    "context": "\n".join(lines[start:end]),
+                                })
+                    break
+        else:
+            for p in overlay_read(tier):
+                note = parse_note(p)
+                matches = []
+                for line in note.body.splitlines():
+                    if pattern.search(line):
+                        matches.append(line.strip())
+                if matches:
+                    results.append({
+                        "tier": tier,
+                        "note_id": note.id,
+                        "content": matches[0],
+                        "context": "\n".join(matches[:3]),
+                    })
 
     return {"results": results, "total_matches": len(results)}
 

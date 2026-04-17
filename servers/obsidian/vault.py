@@ -123,6 +123,17 @@ def resolve_vault(explicit_vault: str | None = None) -> str:
         if name:
             return name
 
+    # Check config (set by vault_switch)
+    config_path = resolve_memory_root() / CONFIG_FILE
+    if config_path.is_file():
+        try:
+            data = json.loads(config_path.read_text())
+            active = data.get("active_vault")
+            if active and active != "global":
+                return active
+        except (json.JSONDecodeError, OSError):
+            pass
+
     git_dir = _walk_up(".git")
     if git_dir and git_dir.is_dir():
         repo_name = _extract_repo_name(git_dir)
@@ -132,8 +143,14 @@ def resolve_vault(explicit_vault: str | None = None) -> str:
     return "global"
 
 
+def _sanitize_vault_name(name: str) -> str:
+    """Strip path traversal and invalid characters from vault names."""
+    name = name.replace("..", "").replace("/", "").replace("\\", "").strip(". ")
+    return name or "global"
+
+
 def vault_path(vault_name: str | None = None) -> Path:
-    name = resolve_vault(vault_name)
+    name = _sanitize_vault_name(resolve_vault(vault_name))
     vp = resolve_memory_root() / name
     vp.mkdir(parents=True, exist_ok=True)
     for tier in TIERS:

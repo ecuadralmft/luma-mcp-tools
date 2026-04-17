@@ -35,6 +35,8 @@ class LinkIndex:
         self._paths.clear()
 
         for md in root.rglob("*.md"):
+            if "backups" in md.parts:
+                continue
             note = parse_note(md)
             self.entries[note.id] = NoteEntry(
                 id=note.id,
