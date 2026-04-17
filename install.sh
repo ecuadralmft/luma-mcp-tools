@@ -34,6 +34,13 @@ python3 -m venv .venv
 .venv/bin/pip install -q -r requirements.txt
 echo "  ✓ Web Search ready"
 
+# Set up pb-ticket venv
+echo "  Setting up PB-Ticket..."
+cd "$SCRIPT_DIR/servers/pb_ticket"
+python3 -m venv .venv
+.venv/bin/pip install -q -r requirements.txt
+echo "  ✓ PB-Ticket ready"
+
 # Generate mcp.json
 mkdir -p "$KIRO_SETTINGS"
 MCP_JSON="$KIRO_SETTINGS/mcp.json"
@@ -71,6 +78,11 @@ existing['web'] = {
     'command': '$SCRIPT_DIR/servers/web/.venv/bin/python3',
     'args': ['$SCRIPT_DIR/servers/web/run.py'],
     'env': {'WEB_SEARCH_BACKEND': 'ddg'}
+}
+existing['pb-ticket'] = {
+    'command': '$SCRIPT_DIR/servers/pb_ticket/.venv/bin/python3',
+    'args': ['$SCRIPT_DIR/servers/pb_ticket/run.py'],
+    'env': {}
 }
 cfg = {'mcpServers': existing}
 with open('$MCP_JSON', 'w') as f:
