@@ -4,7 +4,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KIRO_SETTINGS="$HOME/.kiro/settings"
-MEMORY_ROOT="$HOME/.luma-memory"
+MEMORY_ROOT="/mnt/c/Users/EdgardCuadra/luma-memory"
 
 echo "🔧 Installing luma-mcp-tools..."
 echo ""
@@ -26,6 +26,13 @@ cd "$SCRIPT_DIR/servers/obsidian"
 python3 -m venv .venv
 .venv/bin/pip install -q -r requirements.txt
 echo "  ✓ Obsidian Memory ready"
+
+# Set up web venv
+echo "  Setting up Web Search..."
+cd "$SCRIPT_DIR/servers/web"
+python3 -m venv .venv
+.venv/bin/pip install -q -r requirements.txt
+echo "  ✓ Web Search ready"
 
 # Generate mcp.json
 mkdir -p "$KIRO_SETTINGS"
@@ -60,6 +67,11 @@ existing['obsidian'] = {
     'args': ['$SCRIPT_DIR/servers/obsidian/run.py'],
     'env': {'MEMORY_ROOT': '$MEMORY_ROOT'}
 }
+existing['web'] = {
+    'command': '$SCRIPT_DIR/servers/web/.venv/bin/python3',
+    'args': ['$SCRIPT_DIR/servers/web/run.py'],
+    'env': {'WEB_SEARCH_BACKEND': 'ddg'}
+}
 cfg = {'mcpServers': existing}
 with open('$MCP_JSON', 'w') as f:
     json.dump(cfg, f, indent=2)
@@ -72,6 +84,7 @@ echo ""
 echo "Servers configured:"
 echo "  • GitPulse        → $SCRIPT_DIR/servers/gitpulse/"
 echo "  • Obsidian Memory → $SCRIPT_DIR/servers/obsidian/"
+echo "  • Web Search      → $SCRIPT_DIR/servers/web/"
 echo "  • Vault root      → $MEMORY_ROOT"
 echo ""
 echo "Restart kiro-cli to pick up the new MCP servers."
